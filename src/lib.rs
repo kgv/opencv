@@ -1,3 +1,4 @@
+use self::error::{Error, Result};
 use num::{FromPrimitive, Num, ToPrimitive};
 use opencv::{
     core::{
@@ -10,12 +11,12 @@ use opencv::{
     imgcodecs::{imread, imwrite_def},
     imgproc::{
         arc_length, bounding_rect, canny_def, circle, connected_components, contour_area_def,
-        cvt_color_def, dilate, distance_transform_def, draw_contours, erode, find_contours_def,
-        gaussian_blur_def, line_def, median_blur, min_area_rect, min_enclosing_circle, moments,
-        morphology_default_border_value, morphology_ex, point_polygon_test, put_text_def,
-        rectangle_def, threshold, watershed, DIST_L2, DIST_MASK_5, FILLED, LINE_8,
+        convex_hull_def, cvt_color_def, dilate, distance_transform_def, draw_contours, erode,
+        find_contours_def, gaussian_blur_def, line_def, match_template_def, median_blur,
+        min_area_rect, min_enclosing_circle, moments, morphology_default_border_value,
+        morphology_ex, point_polygon_test, put_text_def, rectangle_def, threshold, watershed,
+        DIST_L2, DIST_MASK_5, FILLED, LINE_8,
     },
-    Result,
 };
 use std::path::Path;
 
@@ -30,6 +31,7 @@ use std::path::Path;
 pub trait Contour {
     fn area(&self) -> Result<f64>;
     fn bounding_rectangle(&self) -> Result<Rect>;
+    fn convex_hull(&self) -> Result<Mat>;
     fn incircle(&self, point: Point_<impl ToPrimitive>) -> Result<Circle>;
     fn max_incircle(&self) -> Result<Circle>;
     fn min_circumcircle(&self) -> Result<Circle>;
@@ -45,6 +47,12 @@ impl Contour for Mat {
 
     fn bounding_rectangle(&self) -> Result<Rect> {
         Ok(bounding_rect(self)?)
+    }
+
+    fn convex_hull(&self) -> Result<Mat> {
+        let mut hull = Mat::default();
+        convex_hull_def(self, &mut hull)?;
+        Ok(hull)
     }
 
     fn incircle(&self, point: Point_<impl ToPrimitive>) -> Result<Circle> {
@@ -68,7 +76,7 @@ impl Contour for Mat {
         let mut mask = Mat::zeros_size(Size::new(width, height), CV_8UC1)?.to_mat()?;
         mask.draw_contour(self, WHITE, FILLED)?;
         let distance_transform = mask.distance_transform(DIST_L2, DIST_MASK_5)?;
-        let (center, radius) = distance_transform.max(Some(&mask))?;
+        let (center, radius) = distance_transform.max(&mask)?;
         Ok(Circle {
             center: center.to().unwrap(),
             radius: radius as _,
@@ -253,10 +261,11 @@ pub trait ToInputArrayExt {
         attempts: i32,
         flags: i32,
     ) -> Result<(f64, Mat)>;
-    fn max(&self, mask: Option<&impl ToInputArray>) -> Result<(Point2i, f64)>;
+    fn match_template(&self, template: &Mat, method: i32, quality: f32) -> Result<Rect>;
+    fn max(&self, mask: &impl ToInputArray) -> Result<(Point2i, f64)>;
     fn mean(&self, mask: &impl ToInputArray) -> Result<VecN<f64, 4>>;
     fn median_blur(&self, ksize: i32) -> Result<Mat>;
-    fn min(&self, mask: Option<&impl ToInputArray>) -> Result<(Point2i, f64)>;
+    fn min(&self, mask: &impl ToInputArray) -> Result<(Point2i, f64)>;
     fn morphology(&self, op: i32, kernel: &impl ToInputArray, iterations: i32) -> Result<Mat>;
     fn read(filename: impl AsRef<Path>, flags: i32) -> Result<Mat>;
     fn split(&self) -> Result<Vector<Mat>>;
@@ -349,20 +358,22 @@ impl<T: ToInputArray> ToInputArrayExt for T {
         Ok((compactness, best_labels))
     }
 
-    fn max(&self, mask: Option<&impl ToInputArray>) -> Result<(Point2i, f64)> {
+    fn match_template(&self, template: &Mat, method: i32, quality: f32) -> Result<Rect> {
+        let mut result = Mat::default();
+        match_template_def(self, template, &mut result, method)?;
+        for (point, value) in result.iter::<f32>()? {
+            if value > quality {
+                let size = template.size()?;
+                return Ok(Rect::new(point.x, point.y, size.width, size.height));
+            }
+        }
+        Err(Error::NotFound)
+    }
+
+    fn max(&self, mask: &impl ToInputArray) -> Result<(Point2i, f64)> {
         let mut point = Point2i::default();
         let mut value = 0.0;
-        match mask {
-            Some(mask) => min_max_loc(self, None, Some(&mut value), None, Some(&mut point), mask)?,
-            None => min_max_loc(
-                self,
-                None,
-                Some(&mut value),
-                None,
-                Some(&mut point),
-                &no_array(),
-            )?,
-        }
+        min_max_loc(self, None, Some(&mut value), None, Some(&mut point), mask)?;
         Ok((point, value))
     }
 
@@ -370,20 +381,10 @@ impl<T: ToInputArray> ToInputArrayExt for T {
         Ok(mean(self, mask)?)
     }
 
-    fn min(&self, mask: Option<&impl ToInputArray>) -> Result<(Point2i, f64)> {
+    fn min(&self, mask: &impl ToInputArray) -> Result<(Point2i, f64)> {
         let mut point = Point2i::default();
         let mut value = 0.0;
-        match mask {
-            Some(mask) => min_max_loc(self, Some(&mut value), None, Some(&mut point), None, mask)?,
-            None => min_max_loc(
-                self,
-                Some(&mut value),
-                None,
-                Some(&mut point),
-                None,
-                &no_array(),
-            )?,
-        }
+        min_max_loc(self, Some(&mut value), None, Some(&mut point), None, mask)?;
         Ok((point, value))
     }
 
@@ -514,18 +515,4 @@ pub struct Circle {
     pub radius: f32,
 }
 
-// mod error {
-//     use thiserror::Error;
-
-//     /// Result
-//     pub type Result<T, E = Error> = std::result::Result<T, E>;
-
-//     /// Error
-//     #[derive(Debug, Error)]
-//     pub enum Error {
-//         #[error("cast error")]
-//         Cast,
-//         #[error(transparent)]
-//         Disconnect(#[from] opencv::Error),
-//     }
-// }
+mod error;

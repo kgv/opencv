@@ -6,3 +6,4 @@ edition = "2021"
 [dependencies]
 opencv = "0.91.2"
 num = "0.4.2"
+thiserror = "1.0.59"
